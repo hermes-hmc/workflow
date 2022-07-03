@@ -3,11 +3,14 @@ from pathlib import Path
 import os
 import json
 import urllib.request
+import typing as t
+
 
 from ruamel.yaml import YAML
 import jsonschema
 from jsonschema.exceptions import ValidationError
 import click
+from cffconvert import Citation
 
 from hermes.model.context import HermesContext
 from hermes.model.errors import HermesValidationError
@@ -16,41 +19,34 @@ from hermes.model.errors import HermesValidationError
 _CFF_VERSION = '1.2.0'
 
 
+def convert_cff_to_codemeta(cff_file: str) -> t.Any:
+    with open(cff_file, 'r') as infile:
+        cffstr = infile.read()
+        codemeta_str = Citation(cffstr).as_codemeta()
+        return json.loads(codemeta_str)
+
+
 def harvest_cff(click_ctx: click.Context, ctx: HermesContext):
     # Get the parent context (every subcommand has its own context with the main click context as parent)
     parent_ctx = click_ctx.parent
+    if parent_ctx is None:
+        raise RuntimeError('No parent context!')
     path = parent_ctx.params['path']
 
     # Get source files
     cff_file = get_single_cff(path)
-    if cff_file is None:
-        click.echo(f'{path} contains either no or more than 1 CITATION.cff file. Aborting harvesting for this '
-                   f'metadata source.')
-        return 1
-    else:
-        cff_dict = load_cff_from_file(cff_file)
-        if not validate(cff_dict):
-            return 1
-        else:
-            # Convert to CodeMeta using cffconvert
-            click.echo(f'Hello CFF harvester for {cff_file}')
-
-    # # Load
-    # cff = read_cff(source)
-    #
-    # # Convert
-    # authors = cff.get('authors')
-    #
-    # if authors:
-    #     for author in authors:
-    #         ctx.update('author', author, src=source)
+    if not cff_file:
+        raise HermesValidationError(f'{path} contains either no or more than 1 CITATION.cff file. Aborting harvesting '
+                                    f'for this metadata source.')
+    cff_dict = load_cff_from_file(cff_file)
+    if not validate(cff_file, cff_dict):
+        raise HermesValidationError(cff_file)
+    # Convert to CodeMeta using cffconvert
+    codemeta = convert_cff_to_codemeta(cff_file)
+    ctx.update_from(codemeta, local_path=cff_file)
 
 
-def read_cff(source):
-    return {}
-
-
-def build_path_str(absolute_path: collections.deque):
+def build_path_str(absolute_path: collections.deque) -> str:
     # Path deque starts with field name, then index, then field name, etc.
     path_str = "'"
     for index, value in enumerate(absolute_path):
@@ -64,7 +60,7 @@ def build_path_str(absolute_path: collections.deque):
     return path_str
 
 
-def validate(cff_file, cff_dict):
+def validate(cff_file: str, cff_dict: t.Dict) -> bool:
     cff_schema_url = f'https://citation-file-format.github.io/{_CFF_VERSION}/schema.json'
 
     with urllib.request.urlopen(cff_schema_url) as cff_schema_response:
@@ -82,30 +78,28 @@ def validate(cff_file, cff_dict):
                        f'-guide.md.')
             return False
         elif len(errors) == 0:
-            click.echo(f'{cff_file} is valid')
+            click.echo(f'Found valid Citation File Format file at: {cff_file}')
             return True
+    return False
 
 
-def load_cff_from_file(cff_file) -> dict:
+def load_cff_from_file(cff_file: str) -> t.Any:
     with open(cff_file, 'r') as fi:
         yaml = YAML(typ='safe')
         yaml.constructor.yaml_constructors[u'tag:yaml.org,2002:timestamp'] = yaml.constructor.yaml_constructors[
             u'tag:yaml.org,2002:str']
-        yaml_dict = yaml.load(fi)
-        return yaml_dict
+        return yaml.load(fi)
 
 
-def get_single_cff(paths):
+def get_single_cff(path: str) -> str:
     # Find CFF files in directories and subdirectories
-    for path in paths:
-        files = find_file_paths('CITATION.cff', path)
-        if len(files) == 1:
-            return files[0]
-        else:
-            return None
+    files = find_file_paths('CITATION.cff', path)
+    if len(files) == 1:
+        return files[0]
+    return ''
 
 
-def find_file_paths(name, path):
+def find_file_paths(name: str, path: str) -> t.List[str]:
     files = []
     for dirpath, dirname, filename in os.walk(path):
         if name in filename:
